@@ -1,0 +1,64 @@
+name: Claude Haiku 5.5 monitor
+
+on:
+  schedule:
+    # Every 5 minutes (the minimum interval GitHub Actions supports).
+    # Runs are best-effort and may be delayed under load.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Override the URL to check (for testing; this run will not disable the workflow)"
+        required: false
+        type: string
+
+# Needed only so the workflow can disable itself after the first alert.
+permissions:
+  actions: write
+
+env:
+  TARGET_URL: https://www.anthropic.com/claude-haiku-5-5
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check page status
+        id: check
+        env:
+          URL: ${{ inputs.url || env.TARGET_URL }}
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 20 \
+            -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36" \
+            "$URL" || true)
+          echo "URL: $URL"
+          echo "HTTP status: $status"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+          # Only 200 counts as "launched". Anything else (404, 403 from bot
+          # protection, 5xx, network error = 000) is not a launch signal.
+          if [ "$status" != "200" ] && [ "$status" != "404" ]; then
+            echo "::warning::Unexpected status $status for $URL (not treated as a launch)"
+          fi
+
+      - name: Notify Telegram
+        if: steps.check.outputs.status == '200'
+        env:
+          URL: ${{ inputs.url || env.TARGET_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -sS --fail-with-body --max-time 20 \
+            -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=🚀 Claude Haiku 5.5 page is live (HTTP 200): ${URL}"
+
+      - name: Disable this workflow (stop monitoring)
+        # Skipped on manual test runs that override the URL.
+        if: steps.check.outputs.status == '200' && !inputs.url
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow disable monitor.yml
